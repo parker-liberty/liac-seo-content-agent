@@ -1,19 +1,15 @@
 """
 Liberty In a Can - SEO Content Agent
-Runs daily via GitHub Actions. Saves .docx files to Google Drive (opens as Google Docs).
+Runs daily via GitHub Actions. Saves as Google Docs in Drive.
 """
 import anthropic
 import os
-import io
 import json
-import re
 import time
 from datetime import datetime
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
-from googleapiclient.http import MediaIoBaseUpload
-from docx import Document
-from docx.shared import Pt
+from googleapiclient.http import MediaInMemoryUpload
 
 ANTHROPIC_API_KEY = os.environ["ANTHROPIC_API_KEY"]
 GOOGLE_DRIVE_FOLDER_ID = os.environ.get("GOOGLE_DRIVE_FOLDER_ID", "")
@@ -41,8 +37,7 @@ BRAND_VOICE = """You are the official SEO copywriter for Liberty In a Can.
 Liberty In a Can makes hemp-derived THC beverages: Liberty Seltzer and Liberty Tea (5mg and 10mg).
 Distributed in Florida and Tennessee. Brand voice: American freedom, bold, witty, lifestyle-forward.
 Never make health claims. Audience: adults 25-55, sober-curious, reducing alcohol.
-Use markdown formatting with # for H1, ## for H2, ** for bold, * for bullets.
-Lead with primary keyword naturally in first 100 words."""
+Use plain text formatting. Use ALL CAPS for headings. Lead with primary keyword naturally in first 100 words."""
 
 
 def pick_todays_keyword():
@@ -57,9 +52,9 @@ def call_with_retry(fn, max_retries=3):
     for attempt in range(max_retries):
         try:
             return fn()
-        except anthropic.RateLimitError as e:
+        except anthropic.RateLimitError:
             wait = 60 * (attempt + 1)
-            print(f"Rate limit hit, waiting {wait}s before retry {attempt + 1}/{max_retries}...")
+            print(f"Rate limit hit, waiting {wait}s (attempt {attempt + 1}/{max_retries})...")
             time.sleep(wait)
     raise Exception("Max retries exceeded")
 
@@ -69,10 +64,10 @@ def research_keyword(client, keyword):
     def _call():
         return client.messages.create(
             model="claude-sonnet-4-20250514",
-            max_tokens=1000,
+            max_tokens=800,
             tools=[{"type": "web_search_20250305", "name": "web_search"}],
-            system="You are an SEO research specialist for hemp THC beverages. Search for the keyword and return a brief with: search intent, top 5 LSI keywords, what top content covers, and content hooks. Be concise.",
-            messages=[{"role": "user", "content": f'Research SEO landscape for: "{keyword}". Focus on hemp THC beverages and alcohol alternatives.'}]
+            system="You are an SEO research specialist for hemp THC beverages. Be concise.",
+            messages=[{"role": "user", "content": f'Research SEO landscape for: "{keyword}". Return: search intent, top 5 LSI keywords, what top content covers, 3 content hooks. Keep it brief.'}]
         )
     response = call_with_retry(_call)
     research = "\n".join(block.text for block in response.content if block.type == "text")
@@ -89,9 +84,9 @@ def write_blog_post(client, keyword, research):
             max_tokens=1500,
             system=BRAND_VOICE,
             messages=[{"role": "user", "content": f"""Write a full SEO blog post (800-1000 words) targeting: "{keyword}"
-Structure: # H1 title, ## H2 sections (3-4), conclusion, ## Frequently Asked Questions (3 Q&As)
+Structure: TITLE (H1), 3-4 sections with SECTION HEADERS, conclusion, FAQ with 3 questions.
 SEO Research: {research}
-Use 2-3 related keywords naturally. Use markdown formatting throughout."""}]
+Use 2-3 related keywords naturally."""}]
         )
     response = call_with_retry(_call)
     content = response.content[0].text
@@ -108,42 +103,13 @@ def write_product_copy(client, keyword, research):
             max_tokens=600,
             system=BRAND_VOICE,
             messages=[{"role": "user", "content": f"""Write SEO product page copy targeting: "{keyword}"
-Structure: # H1 headline, ## Benefits with 3 bullet points, ## Description (120-150 words), ## Call to Action, **Meta Title:** (max 60 chars), **Meta Description:** (max 160 chars)
+Include: HEADLINE, 3 benefit bullets, description (120-150 words), CTA, META TITLE (max 60 chars), META DESCRIPTION (max 160 chars).
 SEO Research: {research}"""}]
         )
     response = call_with_retry(_call)
     content = response.content[0].text
     print(f"Product copy written ({len(content.split())} words)")
     return content
-
-
-def markdown_to_docx(markdown_text):
-    doc = Document()
-    style = doc.styles['Normal']
-    style.font.name = 'Calibri'
-    style.font.size = Pt(11)
-    for line in markdown_text.split('\n'):
-        line = line.rstrip()
-        if line.startswith('# '):
-            doc.add_heading(line[2:], level=1)
-        elif line.startswith('## '):
-            doc.add_heading(line[3:], level=2)
-        elif line.startswith('### '):
-            doc.add_heading(line[4:], level=3)
-        elif line.startswith('* ') or line.startswith('- '):
-            doc.add_paragraph(line[2:], style='List Bullet')
-        elif re.match(r'^\d+\.\s', line):
-            doc.add_paragraph(re.sub(r'^\d+\.\s', '', line), style='List Number')
-        elif line.strip() == '':
-            doc.add_paragraph('')
-        else:
-            p = doc.add_paragraph()
-            for part in re.split(r'(\*\*.*?\*\*)', line):
-                if part.startswith('**') and part.endswith('**'):
-                    p.add_run(part[2:-2]).bold = True
-                else:
-                    p.add_run(part)
-    return doc
 
 
 def get_drive_service():
@@ -154,20 +120,28 @@ def get_drive_service():
     return build("drive", "v3", credentials=creds)
 
 
-def save_docx_to_drive(drive_service, filename, doc, folder_id=None):
-    buffer = io.BytesIO()
-    doc.save(buffer)
-    buffer.seek(0)
+def save_as_google_doc(drive_service, title, content, folder_id=None):
+    """Upload plain text and convert to Google Doc on import — no storage quota needed."""
     file_metadata = {
-        "name": filename,
-        "mimeType": "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        "name": title,
+        "mimeType": "application/vnd.google-apps.document"  # Convert to Google Doc
     }
     if folder_id:
         file_metadata["parents"] = [folder_id]
-    media = MediaIoBaseUpload(buffer, mimetype="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
-    file = drive_service.files().create(body=file_metadata, media_body=media, fields="id").execute()
-    url = f"https://drive.google.com/file/d/{file.get('id')}/view"
-    print(f"Saved: {filename} -> {url}")
+
+    media = MediaInMemoryUpload(
+        content.encode("utf-8"),
+        mimetype="text/plain",
+        resumable=False
+    )
+    file = drive_service.files().create(
+        body=file_metadata,
+        media_body=media,
+        fields="id,webViewLink"
+    ).execute()
+    url = file.get("webViewLink", f"https://docs.google.com/document/d/{file.get('id')}/edit")
+    print(f"Saved Google Doc: {title}")
+    print(f"  URL: {url}")
     return url
 
 
@@ -184,17 +158,16 @@ def run_agent():
     blog_post = write_blog_post(client, keyword, research)
     product_copy = write_product_copy(client, keyword, research)
 
-    print("\nSaving to Google Drive...")
+    print("\nSaving to Google Drive as Google Docs...")
     drive_service = get_drive_service()
     date_str = datetime.now().strftime("%Y-%m-%d")
-    safe_kw = keyword.replace(" ", "_").replace("/", "-")
     folder_id = GOOGLE_DRIVE_FOLDER_ID or None
 
-    blog_doc = markdown_to_docx(f"**Keyword:** {keyword}\n**Date:** {date_str}\n\n---\n\n{blog_post}")
-    save_docx_to_drive(drive_service, f"LIAC_Blog_{safe_kw}_{date_str}.docx", blog_doc, folder_id)
+    blog_text = f"KEYWORD: {keyword}\nDATE: {date_str}\n\n{'='*50}\n\n{blog_post}"
+    save_as_google_doc(drive_service, f"LIAC Blog - {keyword} - {date_str}", blog_text, folder_id)
 
-    product_doc = markdown_to_docx(f"**Keyword:** {keyword}\n**Date:** {date_str}\n\n---\n\n{product_copy}")
-    save_docx_to_drive(drive_service, f"LIAC_ProductCopy_{safe_kw}_{date_str}.docx", product_doc, folder_id)
+    product_text = f"KEYWORD: {keyword}\nDATE: {date_str}\n\n{'='*50}\n\n{product_copy}"
+    save_as_google_doc(drive_service, f"LIAC Product Copy - {keyword} - {date_str}", product_text, folder_id)
 
     print("\nDone! Check your Google Drive LIAC SEO Content folder.")
 
