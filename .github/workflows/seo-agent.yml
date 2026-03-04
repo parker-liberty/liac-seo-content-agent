@@ -23,12 +23,6 @@ jobs:
       - name: Run SEO Agent
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          OUTPUT_DIR: output
+          SMTP_EMAIL: ${{ secrets.SMTP_EMAIL }}
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
         run: python agent.py
-
-      - name: Upload SEO content as artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: LIAC-SEO-Content-${{ github.run_number }}
-          path: output/
-          retention-days: 30
