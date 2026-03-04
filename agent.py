@@ -7,6 +7,7 @@ import os
 import io
 import json
 import re
+import time
 from datetime import datetime
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
@@ -52,15 +53,28 @@ def pick_todays_keyword():
     return KEYWORD_POOL[day_of_year % len(KEYWORD_POOL)]
 
 
+def call_with_retry(fn, max_retries=3):
+    for attempt in range(max_retries):
+        try:
+            return fn()
+        except anthropic.RateLimitError as e:
+            wait = 60 * (attempt + 1)
+            print(f"Rate limit hit, waiting {wait}s before retry {attempt + 1}/{max_retries}...")
+            time.sleep(wait)
+    raise Exception("Max retries exceeded")
+
+
 def research_keyword(client, keyword):
     print(f"Researching: {keyword}")
-    response = client.messages.create(
-        model="claude-sonnet-4-20250514",
-        max_tokens=1500,
-        tools=[{"type": "web_search_20250305", "name": "web_search"}],
-        system="You are an SEO research specialist for hemp THC beverages. Search for the keyword and return a structured brief with: search intent, top 5 LSI keywords, what top content covers, and content hooks.",
-        messages=[{"role": "user", "content": f'Research SEO landscape for: "{keyword}". Focus on hemp THC beverages and alcohol alternatives.'}]
-    )
+    def _call():
+        return client.messages.create(
+            model="claude-sonnet-4-20250514",
+            max_tokens=1000,
+            tools=[{"type": "web_search_20250305", "name": "web_search"}],
+            system="You are an SEO research specialist for hemp THC beverages. Search for the keyword and return a brief with: search intent, top 5 LSI keywords, what top content covers, and content hooks. Be concise.",
+            messages=[{"role": "user", "content": f'Research SEO landscape for: "{keyword}". Focus on hemp THC beverages and alcohol alternatives.'}]
+        )
+    response = call_with_retry(_call)
     research = "\n".join(block.text for block in response.content if block.type == "text")
     print(f"Research complete ({len(research.split())} words)")
     return research
@@ -68,15 +82,18 @@ def research_keyword(client, keyword):
 
 def write_blog_post(client, keyword, research):
     print("Writing blog post...")
-    response = client.messages.create(
-        model="claude-sonnet-4-20250514",
-        max_tokens=2000,
-        system=BRAND_VOICE,
-        messages=[{"role": "user", "content": f"""Write a full SEO blog post (800-1000 words) targeting: "{keyword}"
+    time.sleep(30)
+    def _call():
+        return client.messages.create(
+            model="claude-sonnet-4-20250514",
+            max_tokens=1500,
+            system=BRAND_VOICE,
+            messages=[{"role": "user", "content": f"""Write a full SEO blog post (800-1000 words) targeting: "{keyword}"
 Structure: # H1 title, ## H2 sections (3-4), conclusion, ## Frequently Asked Questions (3 Q&As)
 SEO Research: {research}
 Use 2-3 related keywords naturally. Use markdown formatting throughout."""}]
-    )
+        )
+    response = call_with_retry(_call)
     content = response.content[0].text
     print(f"Blog post written ({len(content.split())} words)")
     return content
@@ -84,14 +101,17 @@ Use 2-3 related keywords naturally. Use markdown formatting throughout."""}]
 
 def write_product_copy(client, keyword, research):
     print("Writing product copy...")
-    response = client.messages.create(
-        model="claude-sonnet-4-20250514",
-        max_tokens=800,
-        system=BRAND_VOICE,
-        messages=[{"role": "user", "content": f"""Write SEO product page copy targeting: "{keyword}"
+    time.sleep(30)
+    def _call():
+        return client.messages.create(
+            model="claude-sonnet-4-20250514",
+            max_tokens=600,
+            system=BRAND_VOICE,
+            messages=[{"role": "user", "content": f"""Write SEO product page copy targeting: "{keyword}"
 Structure: # H1 headline, ## Benefits with 3 bullet points, ## Description (120-150 words), ## Call to Action, **Meta Title:** (max 60 chars), **Meta Description:** (max 160 chars)
 SEO Research: {research}"""}]
-    )
+        )
+    response = call_with_retry(_call)
     content = response.content[0].text
     print(f"Product copy written ({len(content.split())} words)")
     return content
@@ -102,7 +122,6 @@ def markdown_to_docx(markdown_text):
     style = doc.styles['Normal']
     style.font.name = 'Calibri'
     style.font.size = Pt(11)
-
     for line in markdown_text.split('\n'):
         line = line.rstrip()
         if line.startswith('# '):
