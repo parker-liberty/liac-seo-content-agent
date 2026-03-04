@@ -1,19 +1,20 @@
 """
 Liberty In a Can - SEO Content Agent
-Runs daily via GitHub Actions. Saves as Google Docs in Drive.
+Runs daily via GitHub Actions. Emails content to parker@drinklic.com.
 """
 import anthropic
 import os
 import json
 import time
+import smtplib
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
 from datetime import datetime
-from google.oauth2 import service_account
-from googleapiclient.discovery import build
-from googleapiclient.http import MediaInMemoryUpload
 
 ANTHROPIC_API_KEY = os.environ["ANTHROPIC_API_KEY"]
-GOOGLE_DRIVE_FOLDER_ID = os.environ.get("GOOGLE_DRIVE_FOLDER_ID", "")
-GOOGLE_SERVICE_ACCOUNT_JSON = os.environ["GOOGLE_SERVICE_ACCOUNT_JSON"]
+SMTP_EMAIL = os.environ["SMTP_EMAIL"]
+SMTP_PASSWORD = os.environ["SMTP_PASSWORD"]
+TO_EMAIL = "parker@drinklic.com"
 
 KEYWORD_POOL = [
     "THC seltzer Florida",
@@ -37,7 +38,8 @@ BRAND_VOICE = """You are the official SEO copywriter for Liberty In a Can.
 Liberty In a Can makes hemp-derived THC beverages: Liberty Seltzer and Liberty Tea (5mg and 10mg).
 Distributed in Florida and Tennessee. Brand voice: American freedom, bold, witty, lifestyle-forward.
 Never make health claims. Audience: adults 25-55, sober-curious, reducing alcohol.
-Use plain text formatting. Use ALL CAPS for headings. Lead with primary keyword naturally in first 100 words."""
+Use markdown formatting with # for H1, ## for H2, ** for bold, * for bullets.
+Lead with primary keyword naturally in first 100 words."""
 
 
 def pick_todays_keyword():
@@ -84,9 +86,9 @@ def write_blog_post(client, keyword, research):
             max_tokens=1500,
             system=BRAND_VOICE,
             messages=[{"role": "user", "content": f"""Write a full SEO blog post (800-1000 words) targeting: "{keyword}"
-Structure: TITLE (H1), 3-4 sections with SECTION HEADERS, conclusion, FAQ with 3 questions.
+Structure: # H1 title, ## H2 sections (3-4), conclusion, ## Frequently Asked Questions (3 Q&As)
 SEO Research: {research}
-Use 2-3 related keywords naturally."""}]
+Use 2-3 related keywords naturally. Use markdown formatting throughout."""}]
         )
     response = call_with_retry(_call)
     content = response.content[0].text
@@ -103,7 +105,7 @@ def write_product_copy(client, keyword, research):
             max_tokens=600,
             system=BRAND_VOICE,
             messages=[{"role": "user", "content": f"""Write SEO product page copy targeting: "{keyword}"
-Include: HEADLINE, 3 benefit bullets, description (120-150 words), CTA, META TITLE (max 60 chars), META DESCRIPTION (max 160 chars).
+Structure: # H1 headline, ## Benefits with 3 bullet points, ## Description (120-150 words), ## Call to Action, **Meta Title:** (max 60 chars), **Meta Description:** (max 160 chars)
 SEO Research: {research}"""}]
         )
     response = call_with_retry(_call)
@@ -112,37 +114,50 @@ SEO Research: {research}"""}]
     return content
 
 
-def get_drive_service():
-    creds_dict = json.loads(GOOGLE_SERVICE_ACCOUNT_JSON)
-    creds = service_account.Credentials.from_service_account_info(
-        creds_dict, scopes=["https://www.googleapis.com/auth/drive"]
-    )
-    return build("drive", "v3", credentials=creds)
+def send_email(keyword, date_str, blog_post, product_copy):
+    print("Sending email...")
+    subject = f"🌿 LIAC Daily SEO Drop — {keyword} — {date_str}"
 
+    html_body = f"""
+<html><body style="font-family: Arial, sans-serif; max-width: 800px; margin: 0 auto; padding: 20px;">
 
-def save_as_google_doc(drive_service, title, content, folder_id=None):
-    """Upload plain text and convert to Google Doc on import — no storage quota needed."""
-    file_metadata = {
-        "name": title,
-        "mimeType": "application/vnd.google-apps.document"  # Convert to Google Doc
-    }
-    if folder_id:
-        file_metadata["parents"] = [folder_id]
+<h1 style="color: #2d6a4f; border-bottom: 3px solid #2d6a4f; padding-bottom: 10px;">
+    🌿 Liberty In a Can — Daily SEO Content
+</h1>
+<p><strong>Keyword:</strong> {keyword}<br>
+<strong>Date:</strong> {date_str}</p>
 
-    media = MediaInMemoryUpload(
-        content.encode("utf-8"),
-        mimetype="text/plain",
-        resumable=False
-    )
-    file = drive_service.files().create(
-        body=file_metadata,
-        media_body=media,
-        fields="id,webViewLink"
-    ).execute()
-    url = file.get("webViewLink", f"https://docs.google.com/document/d/{file.get('id')}/edit")
-    print(f"Saved Google Doc: {title}")
-    print(f"  URL: {url}")
-    return url
+<hr>
+
+<h2 style="color: #1b4332;">📝 BLOG POST</h2>
+<div style="background: #f8f9fa; padding: 20px; border-radius: 8px; white-space: pre-wrap; font-size: 14px; line-height: 1.6;">
+{blog_post}
+</div>
+
+<br><hr><br>
+
+<h2 style="color: #1b4332;">🛒 PRODUCT COPY</h2>
+<div style="background: #f8f9fa; padding: 20px; border-radius: 8px; white-space: pre-wrap; font-size: 14px; line-height: 1.6;">
+{product_copy}
+</div>
+
+<br>
+<p style="color: #888; font-size: 12px;">Generated by LIAC SEO Agent — github.com/parker-liberty/liac-seo-content-agent</p>
+</body></html>
+"""
+
+    msg = MIMEMultipart("alternative")
+    msg["Subject"] = subject
+    msg["From"] = SMTP_EMAIL
+    msg["To"] = TO_EMAIL
+    msg.attach(MIMEText(html_body, "html"))
+
+    with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
+        server.login(SMTP_EMAIL, SMTP_PASSWORD)
+        server.sendmail(SMTP_EMAIL, TO_EMAIL, msg.as_string())
+
+    print(f"Email sent to {TO_EMAIL}")
+    print(f"Subject: {subject}")
 
 
 def run_agent():
@@ -158,18 +173,10 @@ def run_agent():
     blog_post = write_blog_post(client, keyword, research)
     product_copy = write_product_copy(client, keyword, research)
 
-    print("\nSaving to Google Drive as Google Docs...")
-    drive_service = get_drive_service()
     date_str = datetime.now().strftime("%Y-%m-%d")
-    folder_id = GOOGLE_DRIVE_FOLDER_ID or None
+    send_email(keyword, date_str, blog_post, product_copy)
 
-    blog_text = f"KEYWORD: {keyword}\nDATE: {date_str}\n\n{'='*50}\n\n{blog_post}"
-    save_as_google_doc(drive_service, f"LIAC Blog - {keyword} - {date_str}", blog_text, folder_id)
-
-    product_text = f"KEYWORD: {keyword}\nDATE: {date_str}\n\n{'='*50}\n\n{product_copy}"
-    save_as_google_doc(drive_service, f"LIAC Product Copy - {keyword} - {date_str}", product_text, folder_id)
-
-    print("\nDone! Check your Google Drive LIAC SEO Content folder.")
+    print("\nDone!")
 
 
 if __name__ == "__main__":
