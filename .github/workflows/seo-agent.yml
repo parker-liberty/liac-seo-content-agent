@@ -4,11 +4,6 @@ on:
   schedule:
     - cron: '0 11 * * *'
   workflow_dispatch:
-    inputs:
-      keyword_override:
-        description: 'Optional: override the keyword'
-        required: false
-        default: ''
 
 jobs:
   run-agent:
@@ -23,12 +18,12 @@ jobs:
           python-version: '3.11'
 
       - name: Install dependencies
-        run: pip install anthropic google-auth google-auth-httplib2 google-api-python-client
+        run: |
+          pip install anthropic google-auth google-auth-httplib2 google-api-python-client python-docx
 
       - name: Run SEO Agent
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
           GOOGLE_DRIVE_FOLDER_ID: ${{ secrets.GOOGLE_DRIVE_FOLDER_ID }}
-          KEYWORD_OVERRIDE: ${{ github.event.inputs.keyword_override }}
         run: python agent.py
